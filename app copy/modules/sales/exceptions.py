@@ -1,0 +1,2 @@
+class SalesException(Exception):
+    pass

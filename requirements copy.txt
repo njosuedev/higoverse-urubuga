@@ -1,0 +1,384 @@
+# Enterprise Sales Module (FastAPI)
+
+## app/api/v1/sales.py
+
+```python
+from fastapi import APIRouter
+from app.modules.sales.router import router as sales_router
+
+router = APIRouter()
+
+router.include_router(
+    sales_router,
+    prefix="/sales",
+    tags=["Sales"]
+)
+```
+
+---
+
+# app/modules/sales/router.py
+
+```python
+from fastapi import APIRouter, UploadFile, File
+from app.modules.sales.schema import SaleCreate
+from app.modules.sales.service import (
+    create_sale_service,
+    get_sales_service,
+    upload_sales_service
+)
+
+router = APIRouter()
+
+
+@router.post("/")
+def create_sale(sale: SaleCreate):
+    return create_sale_service(sale)
+
+
+@router.get("/")
+def get_sales():
+    return get_sales_service()
+
+
+@router.post("/upload")
+def upload_sales(file: UploadFile = File(...)):
+    return upload_sales_service(file)
+```
+
+---
+
+# app/modules/sales/schema.py
+
+```python
+from pydantic import BaseModel, field_validator, model_validator
+from typing import Optional
+
+
+class SaleCreate(BaseModel):
+
+    product_name: str
+    sale_price: float
+    sale_quantity: int
+    customer_name: str
+
+    customer_phone: Optional[str] = None
+    customer_tin: Optional[str] = None
+    customer_type: Optional[str] = None
+
+    @field_validator("product_name")
+    @classmethod
+    def validate_product_name(cls, value):
+        value = str(value).strip()
+
+        if not value:
+            raise ValueError("Product name cannot be empty")
+
+        return value
+
+    @field_validator("sale_price")
+    @classmethod
+    def validate_sale_price(cls, value):
+        if value <= 0:
+            raise ValueError("Sale price must be greater than 0")
+
+        return value
+
+    @field_validator("sale_quantity")
+    @classmethod
+    def validate_sale_quantity(cls, value):
+        if value <= 0:
+            raise ValueError("Sale quantity must be greater than 0")
+
+        return value
+
+    @field_validator("customer_phone")
+    @classmethod
+    def validate_phone(cls, value):
+
+        if value is None:
+            return value
+
+        value = str(value).strip()
+
+        if not value.isdigit():
+            raise ValueError("Customer phone must contain only numbers")
+
+        if len(value) != 9:
+            raise ValueError("Customer phone must be exactly 9 digits")
+
+        if value.startswith("0"):
+            raise ValueError("Phone must not start with 0")
+
+        return value
+
+    @field_validator("customer_tin")
+    @classmethod
+    def validate_tin(cls, value):
+
+        if value is None:
+            return value
+
+        value = str(value).strip()
+
+        if not value.isdigit():
+            raise ValueError("Customer TIN must contain only numbers")
+
+        if len(value) != 9:
+            raise ValueError("Customer TIN must be exactly 9 digits")
+
+        return value
+
+    @model_validator(mode="after")
+    def validate_customer(self):
+
+        if not self.customer_phone and not self.customer_tin:
+            raise ValueError(
+                "Provide Customer Phone or Customer TIN"
+            )
+
+        if self.customer_tin:
+            self.customer_type = "company"
+        else:
+            self.customer_type = "personal"
+
+        return self
+```
+
+---
+
+# app/modules/sales/model.py
+
+```python
+from sqlalchemy import Column, Integer, String, Float
+from app.db.base import Base
+
+
+class SaleModel(Base):
+
+    __tablename__ = "sales"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    product_name = Column(String)
+    sale_price = Column(Float)
+    sale_quantity = Column(Integer)
+
+    customer_name = Column(String)
+    customer_phone = Column(String)
+    customer_tin = Column(String)
+    customer_type = Column(String)
+```
+
+---
+
+# app/modules/sales/repository.py
+
+```python
+sales_db = []
+
+
+def create_sale_repository(data):
+    sales_db.append(data)
+    return data
+
+
+
+def get_sales_repository():
+    return sales_db
+```
+
+---
+
+# app/modules/sales/validator.py
+
+```python
+import pandas as pd
+
+
+required_columns = [
+    "Product Name",
+    "Sale Price",
+    "Sale Quantity",
+    "Customer Name"
+]
+
+
+
+def clean_value(v):
+
+    if v is None:
+        return None
+
+    if pd.isna(v):
+        return None
+
+    v = str(v).strip()
+
+    if v.lower() in ["nan", "none", "null", ""]:
+        return None
+
+    return v
+
+
+
+def normalize_columns(df: pd.DataFrame):
+
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.replace("_", " ")
+        .str.title()
+    )
+
+    return df
+```
+
+---
+
+# app/modules/sales/service.py
+
+```python
+import pandas as pd
+import os
+
+from fastapi import UploadFile
+
+from app.modules.sales.schema import SaleCreate
+from app.modules.sales.repository import (
+    create_sale_repository,
+    get_sales_repository
+)
+
+from app.modules.sales.validator import (
+    normalize_columns,
+    required_columns
+)
+
+
+
+def create_sale_service(sale: SaleCreate):
+
+    data = sale.model_dump()
+
+    create_sale_repository(data)
+
+    return {
+        "success": True,
+        "message": "Sale created successfully",
+        "sale": data
+    }
+
+
+
+def get_sales_service():
+
+    sales = get_sales_repository()
+
+    return {
+        "success": True,
+        "total_sales": len(sales),
+        "sales": sales
+    }
+
+
+
+def upload_sales_service(file: UploadFile):
+
+    if not file.filename.endswith((".xlsx", ".xls")):
+        return {
+            "success": False,
+            "message": "Only Excel files allowed"
+        }
+
+    os.makedirs("uploads", exist_ok=True)
+
+    file_path = f"uploads/{file.filename}"
+
+    with open(file_path, "wb") as buffer:
+        buffer.write(file.file.read())
+
+    df = pd.read_excel(file_path, dtype=str)
+
+    df = normalize_columns(df)
+
+    missing = [c for c in required_columns if c not in df.columns]
+
+    if missing:
+        return {
+            "success": False,
+            "missing_columns": missing
+        }
+
+    records = df.to_dict(orient="records")
+
+    added = []
+
+    for row in records:
+
+        sale = SaleCreate(
+            product_name=row.get("Product Name"),
+            sale_price=float(row.get("Sale Price") or 0),
+            sale_quantity=int(row.get("Sale Quantity") or 0),
+            customer_name=row.get("Customer Name"),
+            customer_phone=row.get("Customer Phone"),
+            customer_tin=row.get("Customer TIN")
+        )
+
+        final = sale.model_dump()
+
+        create_sale_repository(final)
+
+        added.append(final)
+
+    return {
+        "success": True,
+        "message": "Sales uploaded successfully",
+        "added_sales": len(added),
+        "sales": added
+    }
+```
+
+---
+
+# app/modules/sales/constants.py
+
+```python
+MAX_PHONE_DIGITS = 9
+MAX_TIN_DIGITS = 9
+```
+
+---
+
+# app/modules/sales/exceptions.py
+
+```python
+class SalesException(Exception):
+    pass
+```
+
+---
+
+# app/modules/sales/utils.py
+
+```python
+from datetime import datetime
+
+
+
+def generate_invoice_number():
+    return f"INV-{datetime.now().timestamp()}"
+```
+
+---
+
+# app/main.py
+
+```python
+from fastapi import FastAPI
+from app.api.v1.sales import router as sales_router
+
+app = FastAPI()
+
+app.include_router(sales_router)
+```
